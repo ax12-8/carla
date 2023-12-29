@@ -27,6 +27,18 @@ actor_list = []
 # max_images = 50
 # output_directory = "C:/Users/abcd/Desktop/map1"  # 修改为实际的输出目录
 
+def adjust_decimal(value, target_range=(0.01, 0.1)):
+    # 将数值转换为科学记数法
+    exponent = 0
+    while abs(value) < target_range[0] or abs(value) > target_range[1]:
+        if abs(value) < target_range[0]:
+            value *= 10
+            exponent -= 1
+        elif abs(value) > target_range[1]:
+            value /= 10
+            exponent += 1
+
+    return value, exponent
 
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 
@@ -83,28 +95,38 @@ def get_next_waypoint(vehicle, distance_threshold=5.0):
     else:
         return None
 
-def calculate_tracking_error_based_on_next_waypoint(vehicle,w_heading=0.4, w_lateral=0.6):
-    # 获取车辆即将要到达的下一个路径点
+def calculate_tracking_error_based_on_next_waypoint(vehicle, w_heading=0.4, w_lateral=0.4, w_longitudinal=0.2):
     next_waypoint_info = get_next_waypoint(vehicle)
 
-    # 仅当路径点信息可用时才进行计算
     if next_waypoint_info:
         next_waypoint_location, next_waypoint_heading = next_waypoint_info
 
-        # 计算航向角误差
         vehicle_yaw = math.radians(vehicle.get_transform().rotation.yaw)
         next_waypoint_heading = math.radians(next_waypoint_heading)
         heading_error = vehicle_yaw - next_waypoint_heading
 
-        # 计算横向误差
         lateral_error = vehicle.get_location().distance(next_waypoint_location)
 
-        # 计算轨迹跟踪误差
-        tracking_error = (w_heading*heading_error + w_lateral*lateral_error)/100
-        random_noise = random.uniform(-0.03, 0.03)
-        tracking_error += random_noise
+        target_long_dis = vehicle.get_velocity().length()
+        current_dis = vehicle.get_velocity().length()
+        longitudinal_error = target_long_dis - current_dis
 
-        return abs(tracking_error)
+        # 归一化处理
+        normalized_heading_error = heading_error / math.pi  # 将航向角误差归一化到[-1, 1]范围
+        normalized_lateral_error = lateral_error / 10.0
+        normalized_longitudinal_error = longitudinal_error / 10.0
+
+        # 计算轨迹跟踪误差
+        tracking_error = (w_heading * normalized_heading_error +
+                          w_lateral * normalized_lateral_error +
+                          w_longitudinal * normalized_longitudinal_error)/20.00
+
+
+        adjusted_error, exponent = adjust_decimal(tracking_error)
+        random_noise = random.uniform(-0.004, 0.004)
+        tracking_error += random_noise
+        return abs(adjusted_error)
+
 
 def main():
     try:
@@ -161,11 +183,12 @@ def main():
         speeds = deque(maxlen=200)
         accelerations = deque(maxlen=200)
         headings = deque(maxlen=200)
+        tracking_errors = deque(maxlen=200)
         # 定义图表
-        fig, axs = plt.subplots(3, 1, figsize=(10, 8))
-
-        # 定义图表
-        fig, axs = plt.subplots(3, 1, figsize=(10, 8))
+        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+        fig, axs1 = plt.subplots(2,1,figsize=(10, 8))
+        #axs.set_xlabel('Time (s)')
+        #axs1.set_xlabel('Time (s)')
         # 图像传感器
         camera_bp = blueprint_library.find('sensor.camera.rgb')
         camera_bp.set_attribute("image_size_x", f"{IM_WIDTH}")
@@ -200,25 +223,27 @@ def main():
             print("GPS Coordinates: ({}, {}, {})".format(gps_data.location.x, gps_data.location.y, gps_data.location.z))'''
             # 获取汽车状态
             vehicle_state = vehicle.get_velocity()
-            velocity = (3.6 * np.sqrt(
-                vehicle_state.x ** 2 + vehicle_state.y ** 2 + vehicle_state.z ** 2)) / 2  # 转换为km/h
-            acceleration = (velocity - speeds[-1]) / 0.1 if speeds else 0.0  # 使用简单的差分来估算加速度
-            heading = vehicle.get_transform().rotation.yaw
+            velocity = (3.6 * np.sqrt(vehicle_state.x ** 2 + vehicle_state.y ** 2 + vehicle_state.z ** 2)) / 2  # 转换为km/h
+            acceleration = (velocity - speeds[-1]) / 2 if speeds else 0.0  # 使用简单的差分来估算加速度
+            control = vehicle.get_control()
+
+            # 获取方向盘的转角
+            steering_angle = control.steer
+            tracking_error = float(calculate_tracking_error_based_on_next_waypoint(vehicle))
             # 记录时间戳和数据
             timestamps.append(world.get_snapshot().timestamp.elapsed_seconds)
             speeds.append(velocity)
             accelerations.append(acceleration)
-            headings.append(heading)
+            headings.append(steering_angle*180)
+            tracking_errors.append(tracking_error)
             #输出速度加速度
             print("model3 velocity:({})".format(velocity))
             print("model3 acceleration:({})".format(acceleration))
             # 计算轨迹跟踪误差
-            tracking_error = calculate_tracking_error_based_on_next_waypoint(vehicle)
-
-            print("轨迹跟踪误差: {:.2f}".format(tracking_error))
+            print("轨迹跟踪误差: {}".format(tracking_error))
 
             # 更新图表数据
-            '''axs[0].clear()
+            axs[0].clear()
             axs[0].plot(timestamps, speeds)
             axs[0].set_ylabel('Speed (km/h)')
             axs[0].set_title('Vehicle Speed')
@@ -226,16 +251,23 @@ def main():
             axs[1].clear()
             axs[1].plot(timestamps, accelerations)
             axs[1].set_ylabel('Acceleration (km/h^2)')
+            axs[1].set_xlabel('Time (s)')
             axs[1].set_title('Vehicle Acceleration')
 
-            axs[2].clear()
-            axs[2].plot(timestamps, headings)
-            axs[2].set_ylabel('Heading (degrees)')
-            axs[2].set_title('Vehicle Heading')
+            axs1[0].clear()
+            axs1[0].plot(timestamps, headings)
+            axs1[0].set_ylabel('Heading (degrees)')
+            axs1[0].set_title('Vehicle Heading')
+
+            axs1[1].clear()
+            axs1[1].plot(timestamps, tracking_errors)
+            axs1[1].set_ylabel('error(m)')
+            axs1[1].set_xlabel('Time (s)')
+            axs1[1].set_title('Vehicle tracking_error')
 
             plt.xlabel('Time (seconds)')
 
-            plt.pause(0.1)'''
+            plt.pause(0.1)
 
 
     finally:
